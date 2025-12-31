@@ -112,7 +112,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // WebRTC Refs - Now using a Map for multiple connections
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  const sendersRef = useRef<Map<string, { audio?: RTCRtpSender; video?: RTCRtpSender }>>(new Map());
   const signalingChannelRef = useRef<RealtimeChannel | null>(null);
   const isSignalingConnectedRef = useRef(false);
 
@@ -913,8 +912,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     peerConnectionsRef.current.set(recipientId, pc);
-    // initialize sender slots for this peer
-    sendersRef.current.set(recipientId, {});
     return pc;
   };
 
@@ -953,14 +950,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         stream.addTrack(newTrack);
         setIsMicOn(true); // Default to ON if we just asked for permission
 
-        // Add this new track to all Peer Connections and store the sender
+        // Add this new track to all Peer Connections
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const stored = sendersRef.current.get(recipientId) || {};
-          if (stored.audio && stored.audio.replaceTrack) {
-            await stored.audio.replaceTrack(newTrack);
+          const transceivers = pc.getTransceivers();
+          const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
+
+          if (audioTransceiver && audioTransceiver.sender) {
+            await audioTransceiver.sender.replaceTrack(newTrack);
           } else {
-            const sender = pc.addTrack(newTrack, stream);
-            sendersRef.current.set(recipientId, { ...stored, audio: sender });
+            pc.addTrack(newTrack, stream);
           }
         }
 
@@ -1006,12 +1004,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       // Update peers: replace video track with null (stop sending video)
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-        const stored = sendersRef.current.get(recipientId) || {};
-        if (stored.video && stored.video.replaceTrack) {
-          stored.video.replaceTrack(null);
-        } else {
-          const fallback = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-          if (fallback && fallback.replaceTrack) fallback.replaceTrack(null);
+        const transceivers = pc.getTransceivers();
+        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+        if (videoTransceiver && videoTransceiver.sender) {
+          videoTransceiver.sender.replaceTrack(null);
         }
       }
 
@@ -1031,15 +1027,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         localStream.addTrack(videoTrack);
         setIsCameraOn(true);
 
-        // Update peers: use stored senders or add and save new senders
+        // Update peers
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const stored = sendersRef.current.get(recipientId) || {};
-          if (stored.video && stored.video.replaceTrack) {
-            try { (stored.video as any).transceiver && ((stored.video as any).transceiver.direction = 'sendrecv'); } catch {}
-            await stored.video.replaceTrack(videoTrack);
+          const transceivers = pc.getTransceivers();
+          const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+
+          if (videoTransceiver && videoTransceiver.sender) {
+            await videoTransceiver.sender.replaceTrack(videoTrack);
+            videoTransceiver.direction = 'sendrecv';
           } else {
-            const sender = pc.addTrack(videoTrack, localStream);
-            sendersRef.current.set(recipientId, { ...stored, video: sender });
+            pc.addTrack(videoTrack, localStream);
           }
         }
         setLocalStream(new MediaStream(localStream.getTracks()));
@@ -1080,12 +1077,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     recipientIds.forEach(async (recipientId) => {
       try {
         const pc = createPeerConnection(recipientId);
-        for (const track of stream!.getTracks()) {
-          const sender = pc.addTrack(track, stream!);
-          const stored = sendersRef.current.get(recipientId) || {};
-          if (track.kind === 'audio') sendersRef.current.set(recipientId, { ...stored, audio: sender });
-          if (track.kind === 'video') sendersRef.current.set(recipientId, { ...stored, video: sender });
-        }
+        stream!.getTracks().forEach(track => pc.addTrack(track, stream!));
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         sendSignal('OFFER', recipientId, { sdp: { type: offer.type, sdp: offer.sdp } });
@@ -1118,12 +1110,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       const pc = createPeerConnection(recipientId);
-      for (const track of stream.getTracks()) {
-        const sender = pc.addTrack(track, stream!);
-        const stored = sendersRef.current.get(recipientId) || {};
-        if (track.kind === 'audio') sendersRef.current.set(recipientId, { ...stored, audio: sender });
-        if (track.kind === 'video') sendersRef.current.set(recipientId, { ...stored, video: sender });
-      }
+      stream.getTracks().forEach(track => pc.addTrack(track, stream!));
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -1146,12 +1133,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setLocalStream(stream);
 
       const pc = createPeerConnection(incomingCall.callerId);
-      for (const track of stream.getTracks()) {
-        const sender = pc.addTrack(track, stream);
-        const stored = sendersRef.current.get(incomingCall.callerId) || {};
-        if (track.kind === 'audio') sendersRef.current.set(incomingCall.callerId, { ...stored, audio: sender });
-        if (track.kind === 'video') sendersRef.current.set(incomingCall.callerId, { ...stored, video: sender });
-      }
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
 
       if (incomingCall.offer) {
         await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
@@ -1183,8 +1165,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const handleRemoteHangup = (senderId: string) => {
     const pc = peerConnectionsRef.current.get(senderId);
     if (pc) { pc.close(); peerConnectionsRef.current.delete(senderId); }
-    // remove stored senders for that peer
-    sendersRef.current.delete(senderId);
     setRemoteStreams(prev => { const newMap = new Map(prev); newMap.delete(senderId); return newMap; });
     setActiveCallData(prev => {
       if (!prev) return null;
@@ -1201,7 +1181,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     peerConnectionsRef.current.forEach(pc => pc.close());
     peerConnectionsRef.current.clear();
-    sendersRef.current.clear();
     setLocalStream(null);
     setRemoteStreams(new Map());
     setIsInCall(false);
@@ -1232,23 +1211,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const replacePromises = [];
 
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-        const stored = sendersRef.current.get(recipientId) || {};
+        const transceivers = pc.getTransceivers();
 
-        // 3. Clear Video Sender (use stored sender if present)
-        if (stored.video && stored.video.replaceTrack) {
-          replacePromises.push(stored.video.replaceTrack(null));
-        } else {
-          // Fallback: attempt to find any video sender on the connection
-          const fallbackVideo = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-          if (fallbackVideo && fallbackVideo.replaceTrack) replacePromises.push(fallbackVideo.replaceTrack(null));
+        // 3. Clear Video Sender
+        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+        if (videoTransceiver && videoTransceiver.sender) {
+          replacePromises.push(videoTransceiver.sender.replaceTrack(null));
         }
 
-        // 4. Force Re-attach Audio Sender (ensure audio sender points to live audio track)
-        if (stored.audio && stored.audio.replaceTrack && audioTrack) {
-          replacePromises.push(stored.audio.replaceTrack(audioTrack));
-        } else if (audioTrack) {
-          const fallbackAudio = pc.getSenders().find(s => (s.track && s.track.kind === 'audio') || s.track === null);
-          if (fallbackAudio && fallbackAudio.replaceTrack) replacePromises.push(fallbackAudio.replaceTrack(audioTrack));
+        // 4. Force Re-attach Audio Sender (The Fix)
+        // This ensures the audio sender is explicitly pointing to our live audio track.
+        // Even if it was already attached, this operation is safe and confirms the link.
+        const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
+        if (audioTransceiver && audioTransceiver.sender && audioTrack) {
+          replacePromises.push(audioTransceiver.sender.replaceTrack(audioTrack));
         }
       }
 
@@ -1308,13 +1284,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Update all peers
         const replacePromises = [];
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const stored = sendersRef.current.get(recipientId) || {};
-          if (stored.video && stored.video.replaceTrack) {
-            try { (stored.video as any).transceiver && ((stored.video as any).transceiver.direction = 'sendrecv'); } catch {}
-            replacePromises.push(stored.video.replaceTrack(screenTrack));
+          const transceivers = pc.getTransceivers();
+          const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+
+          if (videoTransceiver && videoTransceiver.sender) {
+            videoTransceiver.direction = 'sendrecv';
+            replacePromises.push(videoTransceiver.sender.replaceTrack(screenTrack));
           } else {
-            const sender = pc.addTrack(screenTrack, stream);
-            sendersRef.current.set(recipientId, { ...stored, video: sender });
+            pc.addTrack(screenTrack, stream);
           }
         }
         await Promise.all(replacePromises);
