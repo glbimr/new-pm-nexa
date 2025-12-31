@@ -983,10 +983,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     audioTracks.forEach(t => t.enabled = newStatus);
     setIsMicOn(newStatus);
 
-    // Force renegotiation to ensure status sync if needed
-    if (newStatus) {
-      await renegotiate();
+    // Ensure each peer connection's audio sender is explicitly set to our active audio track
+    const activeAudioTrack = audioTracks.find(t => t.readyState === 'live') || audioTracks[0] || null;
+    const replacePromises: Promise<any>[] = [];
+    for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+      const transceivers = pc.getTransceivers();
+      const audioTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'audio') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio'));
+
+      if (audioTransceiver && audioTransceiver.sender) {
+        replacePromises.push(audioTransceiver.sender.replaceTrack(newStatus ? activeAudioTrack : null));
+      } else {
+        // If no transceiver sender exists and we're unmuting, add the track explicitly
+        if (newStatus && activeAudioTrack) {
+          try { pc.addTrack(activeAudioTrack, stream); } catch (e) { console.error('Failed to add audio track to pc', e); }
+        }
+      }
     }
+    await Promise.all(replacePromises);
+
+    // Force renegotiation to ensure peers receive the latest track assignments
+    await renegotiate();
   };
 
   const toggleCamera = async () => {
