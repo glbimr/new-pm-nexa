@@ -952,11 +952,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         // Add this new track to all Peer Connections
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const transceivers = pc.getTransceivers();
-          const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
-
-          if (audioTransceiver && audioTransceiver.sender) {
-            await audioTransceiver.sender.replaceTrack(newTrack);
+          // Prefer finding the audio sender (more reliable than relying on receiver.track)
+          const audioSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+          if (audioSender && audioSender.replaceTrack) {
+            await audioSender.replaceTrack(newTrack);
           } else {
             pc.addTrack(newTrack, stream);
           }
@@ -1004,10 +1003,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       // Update peers: replace video track with null (stop sending video)
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-        const transceivers = pc.getTransceivers();
-        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
-        if (videoTransceiver && videoTransceiver.sender) {
-          videoTransceiver.sender.replaceTrack(null);
+        // Use senders to identify the outgoing video sender reliably
+        const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (videoSender && videoSender.replaceTrack) {
+          videoSender.replaceTrack(null);
         }
       }
 
@@ -1213,18 +1212,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
         const transceivers = pc.getTransceivers();
 
-        // 3. Clear Video Sender
-        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
-        if (videoTransceiver && videoTransceiver.sender) {
-          replacePromises.push(videoTransceiver.sender.replaceTrack(null));
+        // 3. Clear Video Sender (use senders for reliability)
+        const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (videoSender && videoSender.replaceTrack) {
+          replacePromises.push(videoSender.replaceTrack(null));
         }
 
         // 4. Force Re-attach Audio Sender (The Fix)
         // This ensures the audio sender is explicitly pointing to our live audio track.
         // Even if it was already attached, this operation is safe and confirms the link.
-        const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
-        if (audioTransceiver && audioTransceiver.sender && audioTrack) {
-          replacePromises.push(audioTransceiver.sender.replaceTrack(audioTrack));
+        // Ensure audio sender explicitly points to live audio track
+        const audioSender = pc.getSenders().find(s => (s.track && s.track.kind === 'audio') || s.track === null);
+        if (audioSender && audioSender.replaceTrack && audioTrack) {
+          replacePromises.push(audioSender.replaceTrack(audioTrack));
         }
       }
 
@@ -1284,12 +1284,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Update all peers
         const replacePromises = [];
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const transceivers = pc.getTransceivers();
-          const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
-
-          if (videoTransceiver && videoTransceiver.sender) {
-            videoTransceiver.direction = 'sendrecv';
-            replacePromises.push(videoTransceiver.sender.replaceTrack(screenTrack));
+          const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+          if (videoSender && videoSender.replaceTrack) {
+            // ensure transceiver is sendrecv so peers will render
+            try { (videoSender as any).transceiver && ((videoSender as any).transceiver.direction = 'sendrecv'); } catch {}
+            replacePromises.push(videoSender.replaceTrack(screenTrack));
           } else {
             pc.addTrack(screenTrack, stream);
           }
