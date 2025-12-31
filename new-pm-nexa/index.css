@@ -1,5 +1,0 @@
-/* Minimal index.css to avoid 404 on production */
-:root{--bg:#f8fafc}
-html,body,#root{height:100%}
-body{background:var(--bg)}
-/* You can add app-specific overrides here */

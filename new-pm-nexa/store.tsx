@@ -202,33 +202,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // --- 1. Fetch Initial Data from Supabase ---
   useEffect(() => {
     const fetchData = async () => {
-      try {
-        const { data: userData, error: uErr } = await supabase.from('users').select('*');
-        if (uErr) console.warn('Users fetch error:', uErr);
-        if (userData) setUsers(userData.map(mapUserFromDB));
+      const { data: userData } = await supabase.from('users').select('*');
+      if (userData) setUsers(userData.map(mapUserFromDB));
 
-        const { data: projectData, error: pErr } = await supabase.from('projects').select('*');
-        if (pErr) console.warn('Projects fetch error:', pErr);
-        if (projectData) setProjects(projectData.map(mapProjectFromDB));
+      const { data: projectData } = await supabase.from('projects').select('*');
+      if (projectData) setProjects(projectData.map(mapProjectFromDB));
 
-        const { data: taskData, error: tErr } = await supabase.from('tasks').select('*');
-        if (tErr) console.warn('Tasks fetch error:', tErr);
-        if (taskData) setTasks(taskData.map(mapTaskFromDB));
+      const { data: taskData } = await supabase.from('tasks').select('*');
+      if (taskData) setTasks(taskData.map(mapTaskFromDB));
 
-        const { data: msgData, error: mErr } = await supabase.from('decrypted_messages').select('*').order('timestamp', { ascending: true });
-        if (mErr) console.warn('Messages fetch error:', mErr);
-        if (msgData) setMessages(msgData.map(mapMessageFromDB));
+      const { data: msgData } = await supabase.from('decrypted_messages').select('*').order('timestamp', { ascending: true });
+      if (msgData) setMessages(msgData.map(mapMessageFromDB));
 
-        const { data: groupData, error: gErr } = await supabase.from('groups').select('*');
-        if (gErr) console.warn('Groups fetch error:', gErr);
-        if (groupData) setGroups(groupData.map(mapGroupFromDB));
+      const { data: groupData } = await supabase.from('groups').select('*');
+      if (groupData) setGroups(groupData.map(mapGroupFromDB));
 
-        const { data: notifData, error: nErr } = await supabase.from('notifications').select('*').order('timestamp', { ascending: false });
-        if (nErr) console.warn('Notifications fetch error:', nErr);
-        if (notifData) setNotifications(notifData.map(mapNotificationFromDB));
-      } catch (err) {
-        console.error('fetchData unexpected error:', err);
-      }
+      const { data: notifData } = await supabase.from('notifications').select('*').order('timestamp', { ascending: false });
+      if (notifData) setNotifications(notifData.map(mapNotificationFromDB));
     };
 
     fetchData();
@@ -810,16 +800,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return m;
     }));
 
-    // RPC to update DB — catch errors (server may not expose RPC)
-    try {
-      const { error } = await supabase.rpc('mark_messages_read', {
-        p_chat_id: chatId,
-        p_user_id: currentUser.id
-      });
-      if (error) console.warn('mark_messages_read RPC error:', error);
-    } catch (err) {
-      console.warn('markChatRead RPC failed:', err);
-    }
+    // RPC to update DB
+    await supabase.rpc('mark_messages_read', {
+      p_chat_id: chatId,
+      p_user_id: currentUser.id
+    });
   };
 
   const getUnreadCount = (chatId: string) => {
