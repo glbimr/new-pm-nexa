@@ -953,7 +953,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Add this new track to all Peer Connections
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
           const transceivers = pc.getTransceivers();
-          const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
+          const audioTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'audio') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio'));
 
           if (audioTransceiver && audioTransceiver.sender) {
             await audioTransceiver.sender.replaceTrack(newTrack);
@@ -1005,7 +1005,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Update peers: replace video track with null (stop sending video)
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
         const transceivers = pc.getTransceivers();
-        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+        const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
         if (videoTransceiver && videoTransceiver.sender) {
           videoTransceiver.sender.replaceTrack(null);
         }
@@ -1030,7 +1030,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Update peers
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
           const transceivers = pc.getTransceivers();
-          const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+          const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
 
           if (videoTransceiver && videoTransceiver.sender) {
             await videoTransceiver.sender.replaceTrack(videoTrack);
@@ -1214,7 +1214,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const transceivers = pc.getTransceivers();
 
         // 3. Clear Video Sender
-        const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+        const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
         if (videoTransceiver && videoTransceiver.sender) {
           replacePromises.push(videoTransceiver.sender.replaceTrack(null));
         }
@@ -1222,7 +1222,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // 4. Force Re-attach Audio Sender (The Fix)
         // This ensures the audio sender is explicitly pointing to our live audio track.
         // Even if it was already attached, this operation is safe and confirms the link.
-        const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
+        const audioTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'audio') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio'));
         if (audioTransceiver && audioTransceiver.sender && audioTrack) {
           replacePromises.push(audioTransceiver.sender.replaceTrack(audioTrack));
         }
@@ -1285,7 +1285,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const replacePromises = [];
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
           const transceivers = pc.getTransceivers();
-          const videoTransceiver = transceivers.find(t => t.receiver.track.kind === 'video');
+          const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
 
           if (videoTransceiver && videoTransceiver.sender) {
             videoTransceiver.direction = 'sendrecv';
