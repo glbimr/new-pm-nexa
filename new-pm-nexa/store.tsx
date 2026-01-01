@@ -288,19 +288,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (payload.eventType === 'DELETE') setTasks(prev => prev.filter(t => t.id !== payload.old.id));
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, async payload => {
-        if (payload.eventType === 'INSERT') {
-          // Fetch the decrypted message from the view since the real-time payload is encrypted
-          const { data } = await supabase.from('decrypted_messages').select('*').eq('id', payload.new.id).single();
-          if (data) {
-            setMessages(prev => {
-              if (prev.some(m => m.id === data.id)) return prev;
-              return [...prev, mapMessageFromDB(data)];
-            });
+        try {
+          if (payload.eventType === 'INSERT') {
+            // Try to fetch a decrypted view, but fall back to payload.new if unavailable
+            try {
+              const { data } = await supabase.from('decrypted_messages').select('*').eq('id', payload.new.id).single();
+              if (data) {
+                setMessages(prev => prev.some(m => m.id === data.id) ? prev : [...prev, mapMessageFromDB(data)]);
+                return;
+              }
+            } catch (e) {
+              // ignore and fallback to payload.new below
+            }
+
+            // Fallback: use payload.new directly
+            const row = payload.new;
+            const mapped = mapMessageFromDB(row);
+            setMessages(prev => prev.some(m => m.id === mapped.id) ? prev : [...prev, mapped]);
           }
-        }
-        // Handle UPDATE (e.g. Reads)
-        if (payload.eventType === 'UPDATE') {
-          setMessages(prev => prev.map(m => m.id === payload.new.id ? { ...m, isRead: payload.new.is_read } : m));
+
+          // Handle UPDATE (e.g. Reads)
+          if (payload.eventType === 'UPDATE') {
+            setMessages(prev => prev.map(m => m.id === payload.new.id ? { ...m, isRead: payload.new.is_read } : m));
+          }
+        } catch (e) {
+          console.error('Realtime messages handler error:', e);
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'users' }, payload => {
@@ -442,6 +454,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
             handleRemoteHangup(senderId);
             break;
+          case 'CHAT_MESSAGE': {
+            try {
+              const incoming = signalPayload as any;
+              const msg: ChatMessage = {
+                id: incoming.id || (Date.now().toString() + Math.random()),
+                senderId: incoming.senderId || incoming.sender_id || incoming.sender,
+                recipientId: incoming.recipientId || incoming.recipient_id || incoming.recipient,
+                text: incoming.text || incoming.body || incoming.message || '',
+                timestamp: incoming.timestamp || Date.now(),
+                type: incoming.type || 'text',
+                attachments: incoming.attachments || []
+              } as ChatMessage;
+
+              setMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg]);
+            } catch (e) { console.error('Error handling CHAT_MESSAGE', e); }
+            break;
+          }
+
+          case 'SCREEN_STOPPED': {
+            // Sender stopped screen sharing; ensure remoteStreams for that sender drop video tracks
+            try {
+              setRemoteStreams(prev => {
+                const newMap = new Map(prev);
+                const existing = newMap.get(senderId);
+                if (!existing) return prev;
+                const audioTracks = existing.getAudioTracks();
+                const newStream = new MediaStream(audioTracks);
+                newMap.set(senderId, newStream);
+                return newMap;
+              });
+            } catch (e) { console.error('Error handling SCREEN_STOPPED', e); }
+            break;
+          }
         }
       })
       .subscribe((status) => {
@@ -667,13 +712,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const chatId = recipientId || 'general';
     setLastReadTimestamps(prev => ({ ...prev, [chatId]: Date.now() }));
 
-    // 2. Broadcast to active peers (Instant Delivery for Receivers)
-    if (signalingChannelRef.current && isSignalingConnectedRef.current) {
-      signalingChannelRef.current.send({
-        type: 'broadcast',
-        event: 'chat_message',
-        payload: optimisticMsg
-      }).catch(err => console.error("Broadcast failed", err));
+    // 2. Broadcast to active peers (Instant Delivery for Receivers) via signaling
+    if (isSignalingConnectedRef.current) {
+      try {
+        await sendSignal('CHAT_MESSAGE', undefined, optimisticMsg);
+      } catch (err) {
+        console.error('Broadcast failed', err);
+      }
     }
 
     // 3. Persist to DB (Encrypted) via RPC
@@ -1317,6 +1362,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Update preview
       composeLocalStream();
       await renegotiate();
+      // Notify peers to update their remote preview state
+      try { await sendSignal('SCREEN_STOPPED', undefined, {}); } catch (e) { /* non-fatal */ }
     } catch (e) {
       console.error('Error stopping screen share:', e);
     }
@@ -1369,6 +1416,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsScreenSharing(true);
         composeLocalStream();
         await renegotiate();
+        try { await sendSignal('SCREEN_STARTED', undefined, {}); } catch (e) { /* non-fatal */ }
       } catch (err: any) { console.error('Error starting screen share:', err); }
     }
   };
