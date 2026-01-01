@@ -100,6 +100,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeCallData, setActiveCallData] = useState<{ participantIds: string[] } | null>(null);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  // Separate streams for audio and video to avoid coupling audio and screen sharing
+  const [localAudioStream, setLocalAudioStream] = useState<MediaStream | null>(null);
+  const [localVideoStream, setLocalVideoStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
 
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -122,6 +125,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isInCallRef = useRef(isInCall);
   const activeCallDataRef = useRef(activeCallData);
   const localStreamRef = useRef(localStream);
+  const localAudioStreamRef = useRef<MediaStream | null>(null);
+  const localVideoStreamRef = useRef<MediaStream | null>(null);
   const usersRef = useRef(users);
 
   // Map of ChatID -> Timestamp when current user last read it
@@ -187,8 +192,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isInCallRef.current = isInCall;
     activeCallDataRef.current = activeCallData;
     localStreamRef.current = localStream;
+    localAudioStreamRef.current = localAudioStream;
+    localVideoStreamRef.current = localVideoStream;
     usersRef.current = users;
-  }, [incomingCall, isInCall, activeCallData, localStream, users]);
+  }, [incomingCall, isInCall, activeCallData, localStream, localAudioStream, localVideoStream, users]);
 
   // Check available devices
   useEffect(() => {
@@ -915,6 +922,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return pc;
   };
 
+  // Compose a preview local stream from separate audio/video streams
+  const composeLocalStream = () => {
+    const tracks: MediaStreamTrack[] = [];
+    if (localAudioStreamRef.current) tracks.push(...localAudioStreamRef.current.getTracks());
+    if (localVideoStreamRef.current) tracks.push(...localVideoStreamRef.current.getTracks());
+    const composed = new MediaStream(tracks);
+    setLocalStream(composed);
+    localStreamRef.current = composed;
+  };
+
   const renegotiate = async () => {
     if (!localStream) return;
     for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
@@ -929,137 +946,123 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const toggleMic = async () => {
-    let stream = localStreamRef.current || localStream;
+    let audioStream = localAudioStreamRef.current || localAudioStream;
 
-    // 1. Ensure we have a local stream
-    if (!stream) {
-      stream = new MediaStream();
-      setLocalStream(stream);
-      // Update ref immediately for this cycle
-      localStreamRef.current = stream;
-    }
-
-    const audioTracks = stream.getAudioTracks();
-
-    // 2. If NO audio tracks, acquire them (Recovery Mode)
-    if (audioTracks.length === 0) {
+    // If no audio stream yet, request mic permission and create one
+    if (!audioStream) {
       try {
         const newAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const newTrack = newAudioStream.getAudioTracks()[0];
 
-        stream.addTrack(newTrack);
-        setIsMicOn(true); // Default to ON if we just asked for permission
+        setLocalAudioStream(newAudioStream);
+        localAudioStreamRef.current = newAudioStream;
+        setIsMicOn(true);
 
-        // Add this new track to all Peer Connections
+        // Attach audio track to all peer connections
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const transceivers = pc.getTransceivers();
-          const audioTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'audio') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio'));
-
-          if (audioTransceiver && audioTransceiver.sender) {
-            await audioTransceiver.sender.replaceTrack(newTrack);
+          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+          if (sender) {
+            try { await sender.replaceTrack(newTrack); } catch (e) { console.error('replaceTrack audio failed', e); }
           } else {
-            pc.addTrack(newTrack, stream);
+            try { pc.addTrack(newTrack, newAudioStream); } catch (e) { console.error('addTrack audio failed', e); }
           }
         }
 
-        // Force update local stream reference
-        const newStream = new MediaStream(stream.getTracks());
-        setLocalStream(newStream);
-        localStreamRef.current = newStream;
-
-        // Renegotiate to ensure peers receive the new track
+        // Update preview stream
+        composeLocalStream();
         await renegotiate();
         return;
-
       } catch (e) {
-        console.error("Failed to acquire microphone:", e);
-        alert("Could not access microphone.");
+        console.error('Failed to acquire microphone:', e);
+        alert('Could not access microphone.');
         return;
       }
     }
 
-    // 3. Normal Toggle Mode (existing tracks)
+    // Toggle enabled state on existing audio tracks (avoid removing sender.track)
+    const audioTracks = audioStream.getAudioTracks();
     const newStatus = !isMicOn;
     audioTracks.forEach(t => t.enabled = newStatus);
     setIsMicOn(newStatus);
 
-    // Ensure each peer connection's audio sender is explicitly set to our active audio track
-    const activeAudioTrack = audioTracks.find(t => t.readyState === 'live') || audioTracks[0] || null;
-    const replacePromises: Promise<any>[] = [];
-    for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-      const transceivers = pc.getTransceivers();
-      const audioTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'audio') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio'));
-
-      if (audioTransceiver && audioTransceiver.sender) {
-        replacePromises.push(audioTransceiver.sender.replaceTrack(newStatus ? activeAudioTrack : null));
-      } else {
-        // If no transceiver sender exists and we're unmuting, add the track explicitly
-        if (newStatus && activeAudioTrack) {
-          try { pc.addTrack(activeAudioTrack, stream); } catch (e) { console.error('Failed to add audio track to pc', e); }
+    // Ensure senders have a live track when unmuting
+    if (newStatus) {
+      const active = audioTracks.find(t => t.readyState === 'live') || audioTracks[0];
+      if (active) {
+        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+          if (sender && sender.track !== active) {
+            try { await sender.replaceTrack(active); } catch (e) { console.error('replaceTrack audio on unmute failed', e); }
+          } else if (!sender) {
+            try { pc.addTrack(active, audioStream); } catch (e) { console.error('addTrack audio on unmute failed', e); }
+          }
         }
       }
     }
-    await Promise.all(replacePromises);
 
-    // Force renegotiation to ensure peers receive the latest track assignments
+    // Update preview stream
+    composeLocalStream();
     await renegotiate();
   };
 
   const toggleCamera = async () => {
-    if (!localStream) return;
+    // operate on localVideoStream only
+    let videoStream = localVideoStreamRef.current || localVideoStream;
 
     if (isCameraOn) {
-      // Turn off camera
-      localStream.getVideoTracks().forEach(t => {
-        if (!t.label.includes('screen') && !t.getSettings().displaySurface) { // Don't kill screen share
+      if (!videoStream) return;
+      // stop camera tracks that are not screen
+      videoStream.getVideoTracks().forEach(t => {
+        if (!t.label.includes('screen') && !(t.getSettings && (t.getSettings() as any).displaySurface)) {
           t.stop();
-          localStream.removeTrack(t);
+          videoStream!.removeTrack(t);
         }
       });
+      setLocalVideoStream(videoStream.getTracks().length ? videoStream : null);
+      localVideoStreamRef.current = localVideoStream;
       setIsCameraOn(false);
 
-      // Update peers: replace video track with null (stop sending video)
+      // Update peers: clear video sender
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-        const transceivers = pc.getTransceivers();
-        const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
-        if (videoTransceiver && videoTransceiver.sender) {
-          videoTransceiver.sender.replaceTrack(null);
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (sender) {
+          try { await sender.replaceTrack(null); } catch (e) { console.error('replaceTrack null video failed', e); }
         }
       }
 
-      // Force state update
-      setLocalStream(new MediaStream(localStream.getTracks()));
-    } else {
-      try {
-        // Turn on camera
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        const videoTrack = stream.getVideoTracks()[0];
+      composeLocalStream();
+      return;
+    }
 
-        // If we were screen sharing, stop it first (mutually exclusive video track for simplicity)
-        if (isScreenSharing) {
-          await stopScreenSharing();
-        }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const videoTrack = stream.getVideoTracks()[0];
 
-        localStream.addTrack(videoTrack);
-        setIsCameraOn(true);
-
-        // Update peers
-        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const transceivers = pc.getTransceivers();
-          const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
-
-          if (videoTransceiver && videoTransceiver.sender) {
-            await videoTransceiver.sender.replaceTrack(videoTrack);
-            videoTransceiver.direction = 'sendrecv';
-          } else {
-            pc.addTrack(videoTrack, localStream);
-          }
-        }
-        setLocalStream(new MediaStream(localStream.getTracks()));
-        await renegotiate();
-      } catch (e) {
-        console.error("Failed to access camera", e);
+      // If we were screen sharing, stop it first (mutually exclusive video track for simplicity)
+      if (isScreenSharing) {
+        await stopScreenSharing();
       }
+
+      // Set local video stream
+      const newVideoStream = new MediaStream([videoTrack]);
+      setLocalVideoStream(newVideoStream);
+      localVideoStreamRef.current = newVideoStream;
+      setIsCameraOn(true);
+
+      // Update peers
+      for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (sender) {
+          try { await sender.replaceTrack(videoTrack); } catch (e) { console.error('replaceTrack video failed', e); }
+        } else {
+          try { pc.addTrack(videoTrack, newVideoStream); } catch (e) { console.error('addTrack video failed', e); }
+        }
+      }
+
+      composeLocalStream();
+      await renegotiate();
+    } catch (e) {
+      console.error('Failed to access camera', e);
     }
   };
 
@@ -1191,9 +1194,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const cleanupCall = () => {
-    // Use ref to ensure we stop the actual tracks running even if called from a stale closure
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => track.stop());
+    // Stop audio and video streams explicitly
+    if (localAudioStreamRef.current) {
+      localAudioStreamRef.current.getTracks().forEach(t => t.stop());
+      localAudioStreamRef.current = null;
+      setLocalAudioStream(null);
+    }
+    if (localVideoStreamRef.current) {
+      localVideoStreamRef.current.getTracks().forEach(t => t.stop());
+      localVideoStreamRef.current = null;
+      setLocalVideoStream(null);
     }
     peerConnectionsRef.current.forEach(pc => pc.close());
     peerConnectionsRef.current.clear();
@@ -1207,62 +1217,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const stopScreenSharing = async () => {
-    const stream = localStreamRef.current || localStream;
-    if (peerConnectionsRef.current.size === 0 || !stream) return;
+    const vStream = localVideoStreamRef.current || localVideoStream;
+    const aStream = localAudioStreamRef.current || localAudioStream;
+    if (peerConnectionsRef.current.size === 0 || !vStream) return;
     try {
-      // 1. Identify active audio track
-      const audioTrack = stream.getAudioTracks().find(t => t.readyState === 'live');
-
-      // 2. Stop and remove screen/video tracks
-      stream.getVideoTracks().forEach(track => {
-        if (track.label.includes('screen') || track.getSettings().displaySurface) {
+      // Keep audio untouched
+      // Stop and remove screen tracks from video stream
+      vStream.getVideoTracks().forEach(track => {
+        if (track.label.includes('screen') || (track.getSettings && (track.getSettings() as any).displaySurface)) {
           track.stop();
-          stream.removeTrack(track);
+          vStream.removeTrack(track);
         }
       });
 
       setIsScreenSharing(false);
-      setIsCameraOn(false);
 
-      const replacePromises = [];
-
+      // Update peers: clear video sender
       for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-        const transceivers = pc.getTransceivers();
-
-        // 3. Clear Video Sender
-        const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
-        if (videoTransceiver && videoTransceiver.sender) {
-          replacePromises.push(videoTransceiver.sender.replaceTrack(null));
-        }
-
-        // 4. Force Re-attach Audio Sender (The Fix)
-        // This ensures the audio sender is explicitly pointing to our live audio track.
-        // Even if it was already attached, this operation is safe and confirms the link.
-        const audioTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'audio') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'audio'));
-        if (audioTransceiver && audioTransceiver.sender && audioTrack) {
-          replacePromises.push(audioTransceiver.sender.replaceTrack(audioTrack));
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (sender) {
+          try { await sender.replaceTrack(null); } catch (e) { console.error('replaceTrack null video failed', e); }
         }
       }
 
-      await Promise.all(replacePromises);
+      // If there is still an audio stream, ensure senders have it
+      if (aStream) {
+        const activeAudio = aStream.getAudioTracks().find(t => t.readyState === 'live');
+        if (activeAudio) {
+          for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+            const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+            if (sender && sender.track !== activeAudio) {
+              try { await sender.replaceTrack(activeAudio); } catch (e) { console.error('replaceTrack audio failed', e); }
+            }
+          }
+        }
+      }
 
-      // 5. Update Local Stream State
-      // We create a new object to trigger React updates, but it contains the SAME audio track 
-      // that we just confirmed is attached to the sender.
-      const newStream = new MediaStream(audioTrack ? [audioTrack] : []);
-      setLocalStream(newStream);
-      localStreamRef.current = newStream;
-
-      // 6. Force renegotiation
+      // Update preview
+      composeLocalStream();
       await renegotiate();
     } catch (e) {
-      console.error("Error stopping screen share:", e);
+      console.error('Error stopping screen share:', e);
     }
   };
 
   const toggleScreenShare = async () => {
-    const stream = localStreamRef.current || localStream;
-    if (peerConnectionsRef.current.size === 0 || !stream) return;
+    const vStream = localVideoStreamRef.current || localVideoStream;
+    if (peerConnectionsRef.current.size === 0) return;
 
     if (isScreenSharing) {
       await stopScreenSharing();
@@ -1278,48 +1279,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         const screenTrack = displayStream.getVideoTracks()[0];
 
-        // Optimize for "Best Quality" (sharpness/detail) to fix blur
-        if ('contentHint' in screenTrack) {
-          (screenTrack as any).contentHint = 'detail';
-        }
+        if ('contentHint' in screenTrack) (screenTrack as any).contentHint = 'detail';
 
         // If camera is on, stop it first (mutually exclusive video track for simplicity)
-        if (isCameraOn) {
-          stream.getVideoTracks().forEach(t => { t.stop(); stream.removeTrack(t); });
+        if (isCameraOn && localVideoStreamRef.current) {
+          localVideoStreamRef.current.getVideoTracks().forEach(t => { t.stop(); localVideoStreamRef.current!.removeTrack(t); });
           setIsCameraOn(false);
         }
 
-        // Add to local stream for local preview
-        stream.addTrack(screenTrack);
+        // Create or update local video stream to contain screen track
+        const newVideoStream = new MediaStream([screenTrack]);
+        setLocalVideoStream(newVideoStream);
+        localVideoStreamRef.current = newVideoStream;
 
         // Handle stream ending (user clicks "Stop Sharing" in browser UI)
-        screenTrack.onended = () => {
-          stopScreenSharing();
-        };
+        screenTrack.onended = () => { stopScreenSharing(); };
 
         // Update all peers
-        const replacePromises = [];
         for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-          const transceivers = pc.getTransceivers();
-          const videoTransceiver = transceivers.find(t => (t.sender && t.sender.track && t.sender.track.kind === 'video') || (t.receiver && t.receiver.track && t.receiver.track.kind === 'video'));
-
-          if (videoTransceiver && videoTransceiver.sender) {
-            videoTransceiver.direction = 'sendrecv';
-            replacePromises.push(videoTransceiver.sender.replaceTrack(screenTrack));
+          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+          if (sender) {
+            try { await sender.replaceTrack(screenTrack); } catch (e) { console.error('replaceTrack screen failed', e); }
           } else {
-            pc.addTrack(screenTrack, stream);
+            try { pc.addTrack(screenTrack, newVideoStream); } catch (e) { console.error('addTrack screen failed', e); }
           }
         }
-        await Promise.all(replacePromises);
 
         setIsScreenSharing(true);
-        const newStream = new MediaStream(stream.getTracks());
-        setLocalStream(newStream);
-        localStreamRef.current = newStream;
-
+        composeLocalStream();
         await renegotiate();
-
-      } catch (err: any) { console.error("Error starting screen share:", err); }
+      } catch (err: any) { console.error('Error starting screen share:', err); }
     }
   };
 
