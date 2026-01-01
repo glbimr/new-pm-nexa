@@ -691,7 +691,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.error("Error sending encrypted message (RPC):", error);
       // Fallback: attempt direct insert into public.messages to ensure UI visibility
       try {
-        const { error: insertErr } = await supabase.from('messages').insert({
+        const { data: fallbackData, error: insertErr } = await supabase.from('messages').insert({
           id: optimisticMsg.id,
           sender_id: optimisticMsg.senderId,
           recipient_id: optimisticMsg.recipientId,
@@ -699,8 +699,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           timestamp: optimisticMsg.timestamp,
           type: optimisticMsg.type,
           attachments: optimisticMsg.attachments
-        });
-        if (insertErr) console.error('Fallback insert to public.messages failed:', insertErr);
+        }).select();
+        if (insertErr) {
+          console.error('Fallback insert to public.messages failed:', insertErr);
+        } else {
+          console.debug('Fallback insert succeeded, row:', fallbackData);
+          // Refresh messages from public.messages to ensure UI reflects DB
+          try {
+            const refreshed = await fetchMessages({ limit: 500, order: 'asc' });
+            if (refreshed) setMessages(refreshed);
+          } catch (e) {
+            console.warn('Failed to refresh messages after fallback insert:', e);
+          }
+        }
       } catch (e) {
         console.error('Fallback insert exception:', e);
       }
@@ -708,9 +719,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Best-effort: also write to public.messages so the UI (which reads public.messages) is populated.
-    // If the RPC already writes to messages, this will either succeed or error with conflict; log any issues.
     try {
-      const { error: insertErr } = await supabase.from('messages').insert({
+      const { data: insertData, error: insertErr } = await supabase.from('messages').insert({
         id: optimisticMsg.id,
         sender_id: optimisticMsg.senderId,
         recipient_id: optimisticMsg.recipientId,
@@ -718,10 +728,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timestamp: optimisticMsg.timestamp,
         type: optimisticMsg.type,
         attachments: optimisticMsg.attachments
-      });
+      }).select();
+
       if (insertErr) {
         // Not fatal; log for debugging
         console.warn('Insert to public.messages returned error (non-fatal):', insertErr);
+      } else {
+        console.debug('Insert to public.messages succeeded, row:', insertData);
+        try {
+          const refreshed = await fetchMessages({ limit: 500, order: 'asc' });
+          if (refreshed) setMessages(refreshed);
+        } catch (e) {
+          console.warn('Failed to refresh messages after insert:', e);
+        }
       }
     } catch (e) {
       console.error('Insert to public.messages exception (non-fatal):', e);
