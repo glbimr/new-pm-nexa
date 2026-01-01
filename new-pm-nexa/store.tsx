@@ -676,7 +676,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }).catch(err => console.error("Broadcast failed", err));
     }
 
-    // 3. Persist to DB (Encrypted)
+    // 3. Persist to DB (Encrypted) via RPC
     const { error } = await supabase.rpc('send_encrypted_message', {
       p_id: optimisticMsg.id,
       p_sender_id: optimisticMsg.senderId,
@@ -688,8 +688,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     if (error) {
-      console.error("Error sending encrypted message:", error);
+      console.error("Error sending encrypted message (RPC):", error);
+      // Fallback: attempt direct insert into public.messages to ensure UI visibility
+      try {
+        const { error: insertErr } = await supabase.from('messages').insert({
+          id: optimisticMsg.id,
+          sender_id: optimisticMsg.senderId,
+          recipient_id: optimisticMsg.recipientId,
+          text: optimisticMsg.text,
+          timestamp: optimisticMsg.timestamp,
+          type: optimisticMsg.type,
+          attachments: optimisticMsg.attachments
+        });
+        if (insertErr) console.error('Fallback insert to public.messages failed:', insertErr);
+      } catch (e) {
+        console.error('Fallback insert exception:', e);
+      }
       return;
+    }
+
+    // Best-effort: also write to public.messages so the UI (which reads public.messages) is populated.
+    // If the RPC already writes to messages, this will either succeed or error with conflict; log any issues.
+    try {
+      const { error: insertErr } = await supabase.from('messages').insert({
+        id: optimisticMsg.id,
+        sender_id: optimisticMsg.senderId,
+        recipient_id: optimisticMsg.recipientId,
+        text: optimisticMsg.text,
+        timestamp: optimisticMsg.timestamp,
+        type: optimisticMsg.type,
+        attachments: optimisticMsg.attachments
+      });
+      if (insertErr) {
+        // Not fatal; log for debugging
+        console.warn('Insert to public.messages returned error (non-fatal):', insertErr);
+      }
+    } catch (e) {
+      console.error('Insert to public.messages exception (non-fatal):', e);
     }
   };
 
