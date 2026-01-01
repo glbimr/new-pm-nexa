@@ -127,6 +127,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const localStreamRef = useRef(localStream);
   const localAudioStreamRef = useRef<MediaStream | null>(null);
   const localVideoStreamRef = useRef<MediaStream | null>(null);
+  const prevCameraWasOnRef = useRef<boolean>(false);
+  const prevCameraStreamRef = useRef<MediaStream | null>(null);
   const usersRef = useRef(users);
 
   // Map of ChatID -> Timestamp when current user last read it
@@ -1338,15 +1340,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setIsScreenSharing(false);
 
-      // Update peers: clear video sender
-      for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
-        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-        if (sender) {
-          try { await sender.replaceTrack(null); } catch (e) { console.error('replaceTrack null video failed', e); }
+      // If camera was on before screen share, re-acquire camera and reattach video senders
+      if (prevCameraWasOnRef.current) {
+        try {
+          const camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          const camTrack = camStream.getVideoTracks()[0];
+          // set local camera stream
+          setLocalVideoStream(new MediaStream([camTrack]));
+          localVideoStreamRef.current = new MediaStream([camTrack]);
+          setIsCameraOn(true);
+
+          for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+            const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+            if (sender) {
+              try { await sender.replaceTrack(camTrack); } catch (e) { console.error('replaceTrack camera failed', e); }
+            } else {
+              try { pc.addTrack(camTrack, localVideoStreamRef.current!); } catch (e) { console.error('addTrack camera failed', e); }
+            }
+          }
+        } catch (e) {
+          console.error('Failed to re-acquire camera after screen stop:', e);
+          // Fallback: clear video senders so remote preview shows audio/avatar
+          for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+            const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+            if (sender) {
+              try { await sender.replaceTrack(null); } catch (e) { console.error('replaceTrack null video failed', e); }
+            }
+          }
+        }
+        prevCameraWasOnRef.current = false;
+      } else {
+        // No camera to restore: clear video senders so remote preview shows audio/avatar
+        for (const [recipientId, pc] of peerConnectionsRef.current.entries()) {
+          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+          if (sender) {
+            try { await sender.replaceTrack(null); } catch (e) { console.error('replaceTrack null video failed', e); }
+          }
         }
       }
 
-      // If there is still an audio stream, ensure senders have it
+      // Ensure audio senders still have correct audio track
       if (aStream) {
         const activeAudio = aStream.getAudioTracks().find(t => t.readyState === 'live');
         if (activeAudio) {
@@ -1389,10 +1422,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if ('contentHint' in screenTrack) (screenTrack as any).contentHint = 'detail';
 
-        // If camera is on, stop it first (mutually exclusive video track for simplicity)
-        if (isCameraOn && localVideoStreamRef.current) {
-          localVideoStreamRef.current.getVideoTracks().forEach(t => { t.stop(); localVideoStreamRef.current!.removeTrack(t); });
+        // If camera is on, mark it and stop it first (mutually exclusive video track for simplicity)
+        if (isCameraOn) {
+          prevCameraWasOnRef.current = true;
+          if (localVideoStreamRef.current) {
+            // stop existing camera tracks; we'll re-acquire camera when screen share stops
+            localVideoStreamRef.current.getVideoTracks().forEach(t => { t.stop(); localVideoStreamRef.current!.removeTrack(t); });
+            setLocalVideoStream(null);
+            localVideoStreamRef.current = null;
+          }
           setIsCameraOn(false);
+        } else {
+          prevCameraWasOnRef.current = false;
         }
 
         // Create or update local video stream to contain screen track
