@@ -63,7 +63,6 @@ interface AppContextType {
   rejectIncomingCall: () => void;
   endCall: () => void;
   toggleScreenShare: () => Promise<void>;
-  fetchPublicMessages: () => Promise<any[]>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -1217,21 +1216,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsCameraOn(false);
   };
 
-  // Fetch raw messages from public.messages table
-  const fetchPublicMessages = async (): Promise<any[]> => {
-    try {
-      const { data, error } = await supabase.from('messages').select('*').order('timestamp', { ascending: true });
-      if (error) {
-        console.error('Error fetching public.messages:', error);
-        throw error;
-      }
-      return data || [];
-    } catch (e) {
-      console.error('Unexpected error fetching messages:', e);
-      throw e;
-    }
-  };
-
   const stopScreenSharing = async () => {
     const vStream = localVideoStreamRef.current || localVideoStream;
     const aStream = localAudioStreamRef.current || localAudioStream;
@@ -1336,7 +1320,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       login, logout, addUser, updateUser, deleteUser, addTask, updateTask, deleteTask, moveTask, addMessage, createGroup, addProject, updateProject, deleteProject,
       triggerNotification, markNotificationRead, clearNotifications, markChatRead, getUnreadCount, totalUnreadChatCount,
       startCall, startGroupCall, addToCall, acceptIncomingCall, rejectIncomingCall, endCall, toggleScreenShare, toggleMic, toggleCamera
-      , fetchPublicMessages
     }}>
       {children}
     </AppContext.Provider>
