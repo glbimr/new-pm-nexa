@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { User, Project, Task, ChatMessage, UserRole, TaskStatus, Attachment, Group, ProjectAccessLevel, Notification, NotificationType, IncomingCall, SignalData } from './types';
-import { supabase } from './supabaseClient';
+import { supabase, fetchMessages } from './supabaseClient';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 interface AppContextType {
@@ -217,8 +217,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const { data: taskData } = await supabase.from('tasks').select('*');
       if (taskData) setTasks(taskData.map(mapTaskFromDB));
 
-      const { data: msgData } = await supabase.from('decrypted_messages').select('*').order('timestamp', { ascending: true });
-      if (msgData) setMessages(msgData.map(mapMessageFromDB));
+      // Fetch messages from public.messages via helper that normalizes rows
+      try {
+        const msgs = await fetchMessages({ limit: 500, order: 'asc' });
+        if (msgs && msgs.length) setMessages(msgs);
+      } catch (e) {
+        // Fallback: try decrypted_messages if public.messages is unavailable
+        const { data: msgData } = await supabase.from('decrypted_messages').select('*').order('timestamp', { ascending: true });
+        if (msgData) setMessages(msgData.map(mapMessageFromDB));
+      }
 
       const { data: groupData } = await supabase.from('groups').select('*');
       if (groupData) setGroups(groupData.map(mapGroupFromDB));
