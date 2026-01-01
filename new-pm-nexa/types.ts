@@ -162,7 +162,7 @@ export interface IncomingCall {
 }
 
 // WebRTC Signaling Types
-export type SignalType = 'OFFER' | 'ANSWER' | 'CANDIDATE' | 'HANGUP' | 'CHAT_MSG' | 'USER_ONLINE';
+export type SignalType = 'OFFER' | 'ANSWER' | 'CANDIDATE' | 'HANGUP' | 'CHAT_MSG' | 'CHAT_MESSAGE' | 'USER_ONLINE' | 'SCREEN_STARTED' | 'SCREEN_STOPPED';
 
 export interface SignalData {
   type: SignalType;
